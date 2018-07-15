@@ -78,15 +78,13 @@ int main(){
          data_package->data_length = strlen(response_header);
          sed.asyn_write(data_package, false, false);
 
-         printf("111111\n");
          pdata_package_t package = sed.acquire_package(connection);
-         printf("22222\n");
-         sprintf(package->data, "%s", response_data);
-         printf("33333\n");
+         //sprintf(package->data, "%s", response_data);
+
+         package->ref_data = response_data;
          package->data_length = 4000;
-         printf("4444\n");
-         sed.asyn_write(package, false, true);
-         printf("5555\n");
+
+         sed.asyn_write(package, true, true);
 
      }
 

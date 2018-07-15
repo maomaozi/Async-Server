@@ -113,6 +113,7 @@ public:
     ~sync_event_demu_tcp()
     {
         is_running = false;
+        is_initialized = false;
 
         _RELEASE_ARR(i_pool);
         _RELEASE_ARR(p_pool);

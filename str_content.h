@@ -18,6 +18,8 @@
 #define DEBUG_SERVER_DISPATCHER_START               "Debug: Dispatcher start! idx="
 #define DEBUG_SERVER_WORK_START_DISPATCH            "Debug: Got work! Start dispatch..."
 #define DEBUG_SERVER_DISPATCHER_GOT_WORK            "Debug: Process work on dispatcher idx="
+#define DEBUG_SERVER_GC_THREAD_STARTED              "Debug: GC thread started"
+#define DEBUG_SERVER_GC_COLLECT_ONCE                "Debug: GC collected resource"
 
 #define DEBUG_SERVER_DISPATCHER_ACCEPT              "Debug: Accept connection in dispatcher idx="
 #define DEBUG_SERVER_DISPATCHER_READ                "Debug: Read data from client in dispatcher idx="

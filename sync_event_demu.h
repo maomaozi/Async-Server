@@ -25,14 +25,16 @@
 #include "queue_lock_free.h"
 
 #define BLOCK_QUEUE
+#define ONE_PIPE_PACKAGE_OUT
 
 #define _RELEASE(x) if(x) delete (x), x=nullptr
 #define _RELEASE_ARR(x) if(x) delete[] (x), x=nullptr
 
 const size_t        MAX_CONNECT         = 100000;
 const size_t        MAX_DATA_PACKAGE    = 100000;
-const __uint32_t    PACKAGE_SIZE        = 2048;
+const __uint32_t    PACKAGE_SIZE        = 4096;
 const size_t        THREAD_NUM          = 8;
+const size_t        GARBAGE_LIMIT       = 100;
 
 inline bool check_err(int fd, const char *err_string){
     // check a file discriptor (or other sys-call) result is "success"
@@ -78,13 +80,13 @@ public:
         dbg_printf("%s\n", DEBUG_SERVER_START_ALLOC_MEM);
 
         // allocate memory for each thread container
-        i_pool =                new connection_info_pool[THREAD_NUM];
-        p_pool =                new data_package_pool[THREAD_NUM];
+        i_pool =                new pre_alloc_pool<connection_info_t>[THREAD_NUM];
+        p_pool =                new pre_alloc_pool<data_package_t>[THREAD_NUM];
 
         // init container
         for (size_t i = 0; i < THREAD_NUM; ++i){
-            i_pool[i].init(MAX_CONNECT / THREAD_NUM + 1);
-            p_pool[i].init(MAX_DATA_PACKAGE, PACKAGE_SIZE);
+            i_pool[i].init(i, MAX_CONNECT / THREAD_NUM + 1);
+            p_pool[i].init(i, MAX_DATA_PACKAGE, PACKAGE_SIZE);
         }
 
         // communicate to event handler(transfer data package)
@@ -94,7 +96,7 @@ public:
 #else
         data_package_queue =    new lockFreeQueue<pdata_package_t>[THREAD_NUM];
 #endif
-        write_cache =           new std::unordered_map<__uint64_t, std::list<pdata_package_t>>[THREAD_NUM];
+        //write_cache =           new std::unordered_map<__uint64_t, std::list<pdata_package_t>>[THREAD_NUM];
 
         // allocate memory for epoll event
         epoll_events =          new epoll_event[MAX_CONNECT];
@@ -160,6 +162,9 @@ public:
 
         is_running = true;
 
+        std::thread t = std::thread(std::mem_fn(&sync_event_demu_tcp::connection_resource_gc), this);
+        t.detach();
+
         dbg_printf("%s\n", DEBUG_SERVER_CREATE_DISPATCH_THREAD);
         for(size_t i = 0; i < THREAD_NUM;++i)
         {
@@ -211,12 +216,20 @@ public:
     }
 
 public:
-    pdata_package_t asyn_read(int idx)
+    pdata_package_t asyn_read(int idx=0)
     {
         // fetch a random data package with connection info
         // ensure sequence
 
         pdata_package_t package = nullptr;
+
+#ifdef ONE_PIPE_PACKAGE_OUT
+        idx = 0;
+#endif
+
+dbg_printf("info_pool remain %d, package_pool remain %d\n", i_pool[0].remain(), p_pool[0].remain());
+dbg_printf("info_pool remain %d, package_pool remain %d\n", i_pool[1].remain(), p_pool[1].remain());
+
 #ifdef BLOCK_QUEUE
         data_package_queue[idx].wait_dequeue(package);
         return package;
@@ -231,26 +244,48 @@ public:
             return nullptr;
         }
 #endif
+
+
     }
 
-    void asyn_write(int idx, pdata_package_t &package, bool close_connection=false)
+    void asyn_write(pdata_package_t &package, bool pass_data_by_ref=false, bool close_connection=false)
     {
         // require a write work, will finish in background
         // ensure sequence
 
         pconnection_info_t pconnection_info = package->connect;
         package->offset = 0;
-        if (close_connection)
-        {
-            package->status = data_package_t::CLOSE;
-        }
+
+        package->status = close_connection ? data_package_t::CLOSE : data_package_t::KEEP;
+
+        // if data pass by pointer store in ref_data
+        package->by_ref = pass_data_by_ref;
+
         // take "package list" iter of map
-        locker_writer[idx].lock();
-        write_cache[idx][pconnection_info->connection_id].push_back(package);
-        locker_writer[idx].unlock();
-        mod_fd_in_epoll(package->connect->fd, package->connect, EPOLLOUT);
+        locker_connection_write_map.lock();
+        // check if connection still alive
+        if(write_cache.find(pconnection_info->connection_id) != write_cache.end())
+        {
+            write_cache[pconnection_info->connection_id].push_back(package);
+            locker_connection_write_map.unlock();
+            mod_fd_in_epoll(package->connect->fd, package->connect, EPOLLOUT);
+        }
+        else
+        {
+            locker_connection_write_map.unlock();
+            p_pool[package->owner].put(package);
+        }
 
         package = nullptr;
+    }
+
+
+    pdata_package_t acquire_package(pconnection_info_t connection)
+    {
+        pdata_package_t package = p_pool[rand() % THREAD_NUM].get();
+        package->connect = connection;
+
+        return package;
     }
 
 
@@ -384,6 +419,49 @@ private:
     };
 
 
+    void connection_resource_gc(){
+        dbg_printf("%s\n", DEBUG_SERVER_GC_THREAD_STARTED);
+        pconnection_info_t pconnection_info;
+
+        while (1)
+        {
+            int garbage_num = 0;
+
+            if ((garbage_num = garbage_can.size_approx()) < GARBAGE_LIMIT)
+            {
+                std::this_thread::yield();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            dbg_printf("%ssize=%lu\n", DEBUG_SERVER_GC_COLLECT_ONCE, garbage_can.size_approx());
+
+            while (garbage_num--){
+                garbage_can.wait_dequeue(pconnection_info);
+
+                locker_connection_write_map.lock();
+                auto &package_list = write_cache[pconnection_info->connection_id];
+
+                if (!package_list.empty())
+                {
+                    for(auto &package: package_list)
+                    {
+                        p_pool[package->owner].put(package);
+                    }
+
+                    // cancle all pending work
+                    write_cache.erase(pconnection_info->connection_id);
+                }
+
+                locker_connection_write_map.unlock();
+
+                // recycle connection_info
+                i_pool[pconnection_info->owner].put(pconnection_info);
+            }
+
+        }
+    }
+
     void accept_handler(int thread_id, int fd)
     {
         /// handle an epoll accept event,
@@ -392,7 +470,8 @@ private:
         /// remember put it back after connection close
         /// failed return false
         /// success return true
-        dbg_printf("%s%d\n", DEBUG_SERVER_DISPATCHER_ACCEPT, thread_id);
+        dbg_printf("%s%d, connection num=%lu\n", DEBUG_SERVER_DISPATCHER_ACCEPT, thread_id,
+        active_connect_num.load(std::memory_order_relaxed));
 
         if(active_connect_num.load(std::memory_order_relaxed) >= MAX_CONNECT - 10)
         {
@@ -413,13 +492,22 @@ private:
         pconnection_info->ip = inet_ntoa(client_addr.sin_addr);
         pconnection_info->port = ntohs(client_addr.sin_port);
         pconnection_info->connection_id = (ntohl(client_addr.sin_addr.s_addr) << 4) | pconnection_info->port;
+
+        // create a new write list for this connection
+        write_cache.emplace(pconnection_info->connection_id, std::move(std::list<pdata_package_t>()));
+
         // finally add fd to epoll
         if(add_fd_to_epoll(client_fd, pconnection_info)){
             // add success
             active_connect_num.fetch_add(1, std::memory_order_relaxed);
         }else{
-            // add to epoll failed
-            i_pool[thread_id].put(pconnection_info);
+
+            close(client_fd);
+
+            dbg_printf("%s\n", DEBUG_SERVER_CONNECTION_CLOSE);
+
+            // add to epoll failed, recycle resource
+            garbage_can.enqueue(pconnection_info);
         }
     };
 
@@ -431,10 +519,10 @@ private:
         // it can use to get the "instant return data" by event handler
         // or put back by event handler
         pdata_package_t package = p_pool[thread_id].get();
-        pconnection_info_t this_connection_struct = (pconnection_info_t)(event->data.ptr);
+        pconnection_info_t pconnection_info = (pconnection_info_t)(event->data.ptr);
 
         // try to recv data
-        size_t data_size = recv(this_connection_struct->fd, package->data, PACKAGE_SIZE, 0);
+        size_t data_size = recv(pconnection_info->fd, package->data, PACKAGE_SIZE, 0);
 
         // if this connection should close (close by peer or error occured)
         bool need_close_connection = false;
@@ -444,8 +532,11 @@ private:
             // deliver data package
             package->connect = (pconnection_info_t)event->data.ptr;
             package->data_length = data_size;
-
-            data_package_queue[thread_id].enqueue(package);
+#ifdef ONE_PIPE_PACKAGE_OUT
+        data_package_queue[0].enqueue(package);
+#else
+        data_package_queue[thread_id].enqueue(package);
+#endif
         }
         else if(data_size == 0)
         {
@@ -460,17 +551,17 @@ private:
         {
             // socket is closed
 
-            del_fd_from_epoll(this_connection_struct->fd);
-            close(this_connection_struct->fd);
-
-            // put back connect info struct
-            i_pool[thread_id].put(this_connection_struct);
-            // put back data package
-            p_pool[thread_id].put(package);
-
-            dbg_printf("%s\n", DEBUG_SERVER_CONNECTION_CLOSE);
+            // put back this data package
+            p_pool[package->owner].put(package);
 
             active_connect_num.fetch_sub(1, std::memory_order_relaxed);
+
+            // close fd and remove this fd from epoll
+            del_fd_from_epoll(pconnection_info->fd);
+            close(pconnection_info->fd);
+
+            // recycle
+            garbage_can.enqueue(pconnection_info);
         }
     };
 
@@ -483,20 +574,18 @@ private:
         pconnection_info_t pconnection_info = (pconnection_info_t)event->data.ptr;
 
         // take "package list" iter of map
-        locker_writer[thread_id].lock();
-        auto &package_map = write_cache[thread_id][pconnection_info->connection_id];
-        locker_writer[thread_id].unlock();
+        locker_connection_write_map.lock();
+        auto &package_list = write_cache[pconnection_info->connection_id];
 
         // if there is really a list
-        locker_writer[thread_id].lock();
-        if(!package_map.empty())
+        if(!package_list.empty())
         {
             // found the list
             // take first package in list
-            pdata_package_t package = package_map.front();
-            locker_writer[thread_id].unlock();
+            pdata_package_t package = package_list.front();
+            locker_connection_write_map.unlock();
 
-            int sent_length = send(pconnection_info->fd, package->data + package->offset, package->data_length, 0);
+            int sent_length = send(pconnection_info->fd, (package->by_ref ? package->ref_data : package->data) + package->offset, package->data_length, 0);
 
             if (sent_length >= 0)
             {
@@ -512,9 +601,11 @@ private:
                 {
                     // all data is sent
                     // recycle package
-                    p_pool[thread_id].put(package);
+                    p_pool[package->owner].put(package);
                     // remove this package from front
-                    package_map.pop_front();
+                    locker_connection_write_map.lock();
+                    package_list.pop_front();
+                    locker_connection_write_map.unlock();
                 }
             }
 
@@ -523,33 +614,21 @@ private:
             {
                 // connection is close by peer or request close by client
 
-                // cancle all unsend work, recycle back all package
-                locker_writer[thread_id].lock();
-                for(auto &package_in_list : package_map)
-                {
-                    p_pool[thread_id].put(package_in_list);
-                }
-
-                // cancle all pending work
-                write_cache[thread_id].erase(pconnection_info->connection_id);
-                locker_writer[thread_id].unlock();
-
+                // collection all package pending in write list and connection_info
+                // if connection close in read this will never trigger twice
                 active_connect_num.fetch_sub(1, std::memory_order_relaxed);
 
-                // close fd andremove this fd from epoll
+                // close fd and remove this fd from epoll
                 del_fd_from_epoll(pconnection_info->fd);
                 close(pconnection_info->fd);
 
                 dbg_printf("%s\n", DEBUG_SERVER_CONNECTION_CLOSE);
-                // recycle connection_info
-                i_pool[thread_id].put(pconnection_info);
+                garbage_can.enqueue(pconnection_info);
             }
         }
         else
         {
-            // all package in list is sent
-            locker_writer[thread_id].unlock();
-
+            locker_connection_write_map.unlock();
             // continue listen
             mod_fd_in_epoll(pconnection_info->fd, pconnection_info, EPOLLIN);
         }
@@ -560,10 +639,10 @@ private:
 
     // each THREAD has its own connection_info_pool and package_pool
     // connection_info_pool create and recycle per-connection info
-    connection_info_pool *i_pool = nullptr;
+    pre_alloc_pool<connection_info_t> *i_pool = nullptr;
     // package_pool create and recycle some data package
     // package deliver between "sync_event_demu" and "event_handler"
-    data_package_pool *p_pool = nullptr;
+    pre_alloc_pool<data_package_t> *p_pool = nullptr;
 
     // record all connected fd num
     std::atomic<size_t> active_connect_num;
@@ -575,8 +654,10 @@ private:
     lockFreeQueue<pdata_package_t> *data_package_queue = nullptr;
 #endif
 
+    BlockinglockFreeQueue<pconnection_info_t> garbage_can;
+
     // use to cache package need to write_handler
-    std::unordered_map<__uint64_t, std::list<pdata_package_t>> *write_cache = nullptr;
+    std::unordered_map<__uint64_t, std::list<pdata_package_t>> write_cache;
 
     // real thread id to index
     std::unordered_map<std::thread::id, int> thread_id_map;
@@ -586,7 +667,8 @@ private:
 
     // mutex
     std::mutex locker_dispatch;
-    std::mutex locker_writer[THREAD_NUM];
+    std::mutex locker_connection_write_map;
+    std::mutex locker_connection_write_list;
 
     // how many active event number
     int event_num = 0;

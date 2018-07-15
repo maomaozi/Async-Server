@@ -1,3 +1,5 @@
+#pragma once
+/*
 #include "sync_event_demu.h"
 
 class base_event_handler
@@ -11,6 +13,7 @@ public:
      }
 
 public:
-    
+
 
 }
+*/

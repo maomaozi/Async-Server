@@ -481,7 +481,7 @@ template<typename T, size_t MAX_BLOCK_SIZE = 512>
 class BlockinglockFreeQueue
 {
 private:
-	typedef lockFreeQueue<T, MAX_BLOCK_SIZE> lockFreeQueue;
+	using lockFreeQueue_t = lockFreeQueue<T, MAX_BLOCK_SIZE>;
 
 public:
 	explicit BlockinglockFreeQueue(size_t maxSize = 15)
@@ -590,10 +590,10 @@ public:
 
 
 private:
-	BlockinglockFreeQueue(lockFreeQueue const&) {  }
-	BlockinglockFreeQueue& operator=(lockFreeQueue const&) {  }
+	BlockinglockFreeQueue(lockFreeQueue_t const&) {  }
+	BlockinglockFreeQueue& operator=(lockFreeQueue_t const&) {  }
 
 private:
-	lockFreeQueue inner;
+	lockFreeQueue_t inner;
 	spsc_sema::LightweightSemaphore sema;
 };

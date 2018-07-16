@@ -75,7 +75,6 @@ public:
 
         // init atomic recoder
         active_connect_num.store(0, std::memory_order_relaxed);
-        active_dispatch_num.store(0, std::memory_order_relaxed);
 
         dbg_printf("%s\n", DEBUG_SERVER_START_ALLOC_MEM);
 
@@ -194,12 +193,12 @@ public:
             /// if this thread been scheduled continue, no error will happend
             /// because epoll work in LEVEL trigger mode, event_num will increse
             /// until worker process them
+            /*
             locker_dispatch.lock();     // writer lock
             if (active_dispatch_num.load(std::memory_order_relaxed))    // test reader lock
             {
                 locker_dispatch.unlock();
                 std::this_thread::yield();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             else
             {
@@ -207,6 +206,23 @@ public:
                 event_num =  epoll_wait(epoll_fd, epoll_events, MAX_CONNECT, -1);
                 locker_dispatch.unlock();
                 //dbg_printf("%s\n", DEBUG_SERVER_WORK_START_DISPATCH);
+            }
+            */
+
+            // new version
+            // if dispatch_token bit equals 0x0000111111(1 for thread num), that is means all worker thread is now waiting
+            // no other thread will modify event_num and token value, safe set is to some other value
+            if((dispatch_token & no_worker_mask) == no_worker_mask)
+            {
+                event_num =  epoll_wait(epoll_fd, epoll_events, MAX_CONNECT, -1);
+                // set allow all thread start
+                dispatch_token = (__uint64_t)0;
+                dbg_printf("%s\n", DEBUG_SERVER_WORK_START_DISPATCH);
+            }
+            else
+            {
+                // some other thread is working on this value, waiting for job finish
+                std::this_thread::yield();
             }
         }
     }
@@ -297,19 +313,13 @@ private:
         dbg_printf("%s%d\n", DEBUG_SERVER_DISPATCHER_START, this_thread_id);
         while(is_running)
         {
-            locker_dispatch.lock();
-            // there is no job
-            if(!event_num){
-                locker_dispatch.unlock();
-                std::this_thread::yield();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-            else
+            // there is no token(no work or already worked), waiting for work
+            // bit set to 1 means no token
+            // event_num can not modify here, because if a delay thread start, it need to compute work seg
+            if((dispatch_token >> this_thread_id) & 0x01)
             {
-                // if got lock and has job, acquire reader lock and release writer lock
-                active_dispatch_num.fetch_add(1, std::memory_order_relaxed);
-                locker_dispatch.unlock();
+                std::this_thread::yield();
+                continue;
             }
 
             //dbg_printf("%s%d\n", DEBUG_SERVER_DISPATCHER_GOT_WORK, this_thread_id);
@@ -357,8 +367,19 @@ private:
                 }
             }
 
-            event_num = 0;
-            active_dispatch_num.fetch_sub(1, std::memory_order_relaxed);
+            // a spin lock to update token, set bit to 1 mean this work is finish
+            while(1)
+            {
+                // close token, mask = 0x...00000100000..., token OR with mask to set bit
+                __uint64_t new_dispatch_token = dispatch_token | ((__uint64_t)1 << this_thread_id);
+                // if event num is safe to update, atomic update it
+                if(__sync_bool_compare_and_swap(&dispatch_token, dispatch_token, new_dispatch_token))
+                {
+                    // use busy try here, most retry for THREAD_NUM - 1 times
+                    break;
+                }
+            }
+
         }
     }
 
@@ -431,7 +452,6 @@ private:
             if ((garbage_num = garbage_can.size_approx()) < GARBAGE_LIMIT)
             {
                 std::this_thread::yield();
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
 
@@ -648,6 +668,14 @@ private:
     // record all connected fd num
     std::atomic<size_t> active_connect_num;
 
+    // if dispatcher can start work
+    // bit set to 0 -> yes
+    // bit set to 1 -> no
+    volatile __uint64_t dispatch_token = (~((__uint64_t)0)) >> (64 - THREAD_NUM);
+
+    // 0x000000111111(1 for thread num)
+    const __uint64_t no_worker_mask = (~((__uint64_t)0)) >> (64 - THREAD_NUM);
+
     // per-thread pipe connect to event handler
 #ifdef BLOCK_QUEUE
     BlockinglockFreeQueue<pdata_package_t> *data_package_queue = nullptr;
@@ -663,13 +691,8 @@ private:
     // real thread id to index
     std::unordered_map<std::thread::id, int> thread_id_map;
 
-    // active_dispatch_num record how many event is now under porcessing
-    std::atomic<size_t> active_dispatch_num;
-
     // mutex
-    std::mutex locker_dispatch;
     std::mutex locker_connection_write_map;
-    std::mutex locker_connection_write_list;
 
     // how many active event number
     int event_num = 0;

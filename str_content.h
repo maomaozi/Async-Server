@@ -36,7 +36,7 @@
 #define FATAL_SOCKET_CAN_NOT_CREATE    "Fatal: Can't create socket"
 #define FATAL_SOCKET_CAN_NOT_BIND      "Fatal: Can't bind socket"
 #define FATAL_SOCKET_CAN_NOT_LISTEN    "Fatal: Can't listen socket"
-#define FATAL_SOCKET_CAN_NOT_ACCEPT    "Fatal: Can't accept connect"
+#define FATAL_SOCKET_CAN_NOT_ACCEPT    "Error: Can't accept connect"
 
 #define FATAL_EPOLL_CAN_NOT_CREATE     "Fatal: Can't create epoll"
 

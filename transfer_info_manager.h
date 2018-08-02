@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <functional>
 #include "queue_lock_free.h"
 
 typedef struct connection_info
@@ -28,7 +29,11 @@ typedef struct data_package
 
 	char * const data = nullptr;
 	char * ref_data = nullptr;
+
 	bool by_ref = false;
+	//void (*deleter)(void*) = nullptr;
+    std::function<void(void *)> deleter;
+
 	int offset = 0;
 	__uint32_t data_length = 0;
 

@@ -30,10 +30,10 @@
 #define _RELEASE(x) if(x) delete (x), x=nullptr
 #define _RELEASE_ARR(x) if(x) delete[] (x), x=nullptr
 
-const size_t        MAX_CONNECT         = 100000;
-const size_t        MAX_DATA_PACKAGE    = 100000;
+const size_t        MAX_CONNECT         = 10000;
+const size_t        MAX_DATA_PACKAGE    = 10000;
 const __uint32_t    PACKAGE_SIZE        = 4096;
-const size_t        THREAD_NUM          = 8;
+const size_t        THREAD_NUM          = 4;
 const size_t        GARBAGE_LIMIT       = 100;
 
 inline bool check_err(int fd, const char *err_string){
@@ -263,7 +263,7 @@ public:
 #endif
     }
 
-    void asyn_write(pdata_package_t &package, bool pass_data_by_ref=false, bool close_connection=false, std::function<void(void *)> ref_deleter=[](void*){;})
+    void asyn_write(pdata_package_t &package, bool pass_data_by_ref=false, bool close_connection=false, std::function<void(char *)> ref_deleter=[](char *){;})
     {
         // require a write work, will finish in background
         // ensure sequence
@@ -281,7 +281,7 @@ public:
 
         // take "package list" iter of map
         locker_connection_write_map.lock();
-        
+
         // check if connection still alive
         if(write_cache.find(pconnection_info->connection_id) != write_cache.end())
         {
@@ -571,7 +571,7 @@ private:
             // deliver data package
             package->connect = (pconnection_info_t)event->data.ptr;
             package->data_length = data_size;
-            
+
 #ifdef ONE_PIPE_PACKAGE_OUT
         data_package_queue[0].enqueue(package);
 #else

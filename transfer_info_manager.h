@@ -32,7 +32,7 @@ typedef struct data_package
 
 	bool by_ref = false;
 	//void (*deleter)(void*) = nullptr;
-    std::function<void(void *)> deleter;
+    std::function<void(char *)> deleter;
 
 	int offset = 0;
 	__uint32_t data_length = 0;

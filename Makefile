@@ -23,4 +23,4 @@ echo_http: async_event_processor.so
 .PHONY: clean
 
 clean:
-	rm -f *.so
+	rm -f *.so test_http echo_http

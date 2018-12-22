@@ -1,0 +1,3 @@
+*.so
+test_http
+echo_https
